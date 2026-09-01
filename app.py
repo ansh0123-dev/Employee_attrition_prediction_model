@@ -1,19 +1,4 @@
-"""
-app.py
-------
-HR Analytics Dashboard with Employee Attrition Prediction (Streamlit)
 
-Run locally with:
-    streamlit run app.py
-
-Features (mapped to SRS functional requirements):
-  FR-1 Upload employee dataset
-  FR-2 Clean & preprocess data
-  FR-3 HR data analysis (EDA charts)
-  FR-4/5 Train ML models & evaluate (Accuracy, Precision, Recall, F1, ROC-AUC)
-  FR-6 Predict employee attrition (single employee or batch CSV)
-  FR-7 Dashboard & charts
-  FR-8 Downloadable report (CSV of predictions)
 """
 
 import json
