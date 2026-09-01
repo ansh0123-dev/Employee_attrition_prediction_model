@@ -23,6 +23,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+import api_client
 from train_model import build_preprocessor, evaluate, load_and_clean, TARGET
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
@@ -50,7 +51,8 @@ def train_new_model(df: pd.DataFrame):
     df = df.copy()
     df = df.drop(columns=[c for c in ["EmployeeCount", "EmployeeNumber", "Over18", "StandardHours"] if c in df.columns])
     df = df.drop_duplicates()
-    df[TARGET] = df[TARGET].map({"Yes": 1, "No": 0}) if not pd.api.types.is_numeric_dtype(df[TARGET]) else df[TARGET]
+    df[TARGET] = df[TARGET].map({"Yes": 1, "No": 0}) if df[TARGET].dtype == object else df[TARGET]
+    X = df.drop(columns=[TARGET])
     y = df[TARGET]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
     preprocessor, cat_cols, num_cols = build_preprocessor(df)
@@ -100,7 +102,9 @@ def predict_df(df, model, metadata):
 st.title("HR Analytics Dashboard — Employee Attrition Prediction")
 st.caption("Upload employee data, explore trends, train a model, and predict attrition risk.")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard / EDA", "🤖 Train Model", "🔮 Predict Attrition", "ℹ️ About"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["📊 Dashboard / EDA", "🤖 Train Model", "🔮 Predict Attrition", "📜 My History", "ℹ️ About"]
+)
 
 if "raw_df" not in st.session_state:
     st.session_state.raw_df = None
@@ -108,8 +112,59 @@ if "model" not in st.session_state:
     m, md = load_default_model()
     st.session_state.model = m
     st.session_state.metadata = md
+if "auth_token" not in st.session_state:
+    st.session_state.auth_token = None
+if "current_user" not in st.session_state:
+    st.session_state.current_user = None
 
 with st.sidebar:
+    st.header("Account")
+    if not api_client.is_backend_up():
+        st.error(
+            "Backend API is not reachable. Start it with `python backend/app.py` "
+            "(see backend/README or the main README)."
+        )
+    elif st.session_state.auth_token is None:
+        auth_mode = st.radio("", ["Login", "Sign up"], horizontal=True, label_visibility="collapsed")
+        if auth_mode == "Login":
+            with st.form("login_form"):
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
+                submitted = st.form_submit_button("Log in")
+            if submitted:
+                resp = api_client.login(email, password)
+                if resp.get("success"):
+                    st.session_state.auth_token = resp["data"]["token"]
+                    st.session_state.current_user = resp["data"]["user"]
+                    st.success("Logged in.")
+                    st.rerun()
+                else:
+                    st.error(resp.get("message", "Login failed"))
+        else:
+            with st.form("signup_form"):
+                name = st.text_input("Full name")
+                email = st.text_input("Email")
+                password = st.text_input("Password (min 6 characters)", type="password")
+                submitted = st.form_submit_button("Create account")
+            if submitted:
+                resp = api_client.register(name, email, password)
+                if resp.get("success"):
+                    st.success("Account created. Please log in.")
+                else:
+                    msg = resp.get("message", "Registration failed")
+                    errs = resp.get("errors")
+                    st.error(f"{msg}" + (f" — {errs}" if errs else ""))
+    else:
+        user = st.session_state.current_user or {}
+        st.success(f"Logged in as **{user.get('name', 'User')}**")
+        st.caption(user.get("email", ""))
+        if st.button("Log out"):
+            api_client.logout(st.session_state.auth_token)
+            st.session_state.auth_token = None
+            st.session_state.current_user = None
+            st.rerun()
+
+    st.divider()
     st.header("1. Upload Employee Dataset")
     uploaded = st.file_uploader("CSV file (e.g. IBM HR Attrition dataset)", type=["csv"])
     if uploaded is not None:
@@ -130,7 +185,7 @@ with tab1:
             st.warning(f"No '{TARGET}' column found — showing general stats only.")
         else:
             col1, col2, col3, col4 = st.columns(4)
-            rate = (df[TARGET] == "Yes").mean() if not pd.api.types.is_numeric_dtype(df[TARGET]) else df[TARGET].mean()
+            rate = (df[TARGET] == "Yes").mean() if df[TARGET].dtype == object else df[TARGET].mean()
             col1.metric("Total Employees", len(df))
             col2.metric("Attrition Rate", f"{rate:.1%}")
             col3.metric("Avg Monthly Income", f"{df['MonthlyIncome'].mean():,.0f}" if "MonthlyIncome" in df else "N/A")
@@ -204,32 +259,89 @@ with tab3:
                     csv = result.to_csv(index=False).encode("utf-8")
                     st.download_button("⬇️ Download predictions as CSV", csv, "attrition_predictions.csv", "text/csv")
         else:
-            st.write("Enter employee details:")
-            cols = st.columns(3)
-            inputs = {}
-            feature_columns = metadata["feature_columns"]
-            cat_cols = metadata.get("categorical_columns", [])
-            base_df = st.session_state.raw_df
-            for i, col in enumerate(feature_columns):
-                target_col = cols[i % 3]
-                if col in cat_cols and base_df is not None and col in base_df.columns:
-                    options = sorted(base_df[col].dropna().unique().tolist())
-                    inputs[col] = target_col.selectbox(col, options)
-                else:
-                    default_val = float(base_df[col].mean()) if (base_df is not None and col in base_df.columns) else 0.0
-                    inputs[col] = target_col.number_input(col, value=default_val)
+            if st.session_state.auth_token is None:
+                st.warning("🔒 Please log in from the sidebar to run a single-employee prediction. "
+                           "This calls the backend API and saves the result to your personal history.")
+            else:
+                st.write("Enter employee details:")
+                cols = st.columns(3)
+                inputs = {}
+                feature_columns = metadata["feature_columns"]
+                cat_cols = metadata.get("categorical_columns", [])
+                base_df = st.session_state.raw_df
+                for i, col in enumerate(feature_columns):
+                    target_col = cols[i % 3]
+                    if col in cat_cols and base_df is not None and col in base_df.columns:
+                        options = sorted(base_df[col].dropna().unique().tolist())
+                        inputs[col] = target_col.selectbox(col, options)
+                    else:
+                        default_val = float(base_df[col].mean()) if (base_df is not None and col in base_df.columns) else 0.0
+                        inputs[col] = target_col.number_input(col, value=default_val)
 
-            if st.button("Predict"):
-                single = pd.DataFrame([inputs])
-                result = predict_df(single, model, metadata)
-                if result is not None:
-                    row = result.iloc[0]
-                    st.metric("Prediction", row["Attrition_Prediction"])
-                    st.metric("Probability of Leaving", f"{row['Attrition_Probability']:.1%}")
-                    st.metric("Risk Level", str(row["Risk_Level"]))
+                if st.button("Predict"):
+                    # Goes through the backend API (auth-protected) so the
+                    # result is validated server-side and saved to this
+                    # user's prediction history in the database.
+                    resp = api_client.predict(st.session_state.auth_token, inputs)
+                    if resp.get("success"):
+                        data = resp["data"]
+                        st.metric("Prediction", data["prediction"])
+                        st.metric("Probability of Leaving", f"{data['probability']:.1%}")
+                        st.metric("Risk Level", data["risk_level"])
+                        st.caption(f"Saved to your history at {data['timestamp']}")
+                    elif resp.get("_status") == 401:
+                        st.error("Your session has expired. Please log in again from the sidebar.")
+                        st.session_state.auth_token = None
+                        st.session_state.current_user = None
+                    else:
+                        st.error(resp.get("message", "Prediction failed"))
 
-# ---------------- Tab 4: About ----------------
+# ---------------- Tab 4: My History ----------------
 with tab4:
+    st.subheader("My Prediction History")
+    if st.session_state.auth_token is None:
+        st.warning("🔒 Please log in from the sidebar to view your prediction history.")
+    else:
+        if st.button("🔄 Refresh history"):
+            st.rerun()
+        resp = api_client.get_history(st.session_state.auth_token)
+        if resp.get("success"):
+            records = resp["data"]["history"]
+            if not records:
+                st.info("No predictions yet. Run one from the 'Predict Attrition' tab.")
+            else:
+                hist_df = pd.DataFrame(
+                    [
+                        {
+                            "Date": r["createdAt"],
+                            "Prediction": r["prediction"],
+                            "Probability": r["probability"],
+                            "Risk Level": r["riskLevel"],
+                            "id": r["id"],
+                        }
+                        for r in records
+                    ]
+                )
+                st.dataframe(hist_df.drop(columns=["id"]), use_container_width=True)
+
+                st.markdown("##### Delete a record")
+                del_id = st.selectbox("Select a record ID to delete", hist_df["id"].tolist())
+                if st.button("🗑️ Delete selected record"):
+                    del_resp = api_client.delete_prediction(st.session_state.auth_token, del_id)
+                    if del_resp.get("success"):
+                        st.success("Deleted.")
+                        st.rerun()
+                    else:
+                        st.error(del_resp.get("message", "Delete failed"))
+        elif resp.get("_status") == 401:
+            st.error("Your session has expired. Please log in again from the sidebar.")
+            st.session_state.auth_token = None
+            st.session_state.current_user = None
+        else:
+            st.error(resp.get("message", "Could not load history"))
+
+# ---------------- Tab 5: About ----------------
+with tab5:
     st.markdown("""
     ### HR Analytics Dashboard with Employee Attrition Prediction
     This end-to-end system:
@@ -238,6 +350,9 @@ with tab4:
     - Evaluates models with Accuracy, Precision, Recall, F1-score, and ROC-AUC
     - Predicts attrition risk for individual employees or full batches
     - Visualizes attrition trends by department, job role, overtime, and age
+    - Requires login for single-employee predictions and keeps a private,
+      per-user history of every prediction made (backed by a FastAPI + JWT +
+      database backend in `backend/`)
 
     Built to satisfy the functional requirements (FR-1 to FR-8) defined in the project SRS.
     """)

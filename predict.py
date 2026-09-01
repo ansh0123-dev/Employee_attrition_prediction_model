@@ -14,12 +14,19 @@ Usage:
 
 import argparse
 import json
+import os
 
 import joblib
 import pandas as pd
 
-MODEL_PATH = "attrition_model.joblib"
-METADATA_PATH = "attrition_model_metadata.json"
+# Resolve paths relative to this file (not the current working directory) so
+# predict.py works identically whether run as a CLI script from the project
+# root or imported as a module from elsewhere (e.g. backend/services/ml_service.py).
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.environ.get("MODEL_PATH", os.path.join(_BASE_DIR, "attrition_model.joblib"))
+METADATA_PATH = os.environ.get(
+    "METADATA_PATH", os.path.join(_BASE_DIR, "attrition_model_metadata.json")
+)
 
 
 def load_artifacts():
